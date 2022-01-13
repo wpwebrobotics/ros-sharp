@@ -46,6 +46,8 @@ namespace RosSharp.RosBridgeClient.Protocols
         public event EventHandler OnConnected;
         public event EventHandler OnClosed;
 
+        public Exception ConnectException { get; private set; }
+
         public WebSocketNetProtocol(string uriString, int queueSize = 1000)
         {
             Channel<ArraySegment<byte>> channel = Channel.CreateUnbounded<ArraySegment<byte>>(new UnboundedChannelOptions()
@@ -68,13 +70,23 @@ namespace RosSharp.RosBridgeClient.Protocols
             Task.Run(() => ConnectAsync());
         }
 
+        // Modificato per gestione errori.
         public async void ConnectAsync()
         {
-            await clientWebSocket.ConnectAsync(uri, cancellationToken);
-            IsConnected.Set();
-            OnConnected?.Invoke(null, EventArgs.Empty);
-            listener = Task.Run(StartListen);
-            sender = Task.Run(StartSend);
+            try
+            {
+                await clientWebSocket.ConnectAsync(uri, cancellationToken);
+                IsConnected.Set();
+                OnConnected?.Invoke(null, EventArgs.Empty);
+                listener = Task.Run(StartListen);
+                sender = Task.Run(StartSend);
+                ConnectException = null;
+            }
+            catch (Exception e)
+            {
+                clientWebSocket.Abort();
+                ConnectException = e;
+            }
         }
 
         public void Close()
@@ -129,6 +141,7 @@ namespace RosSharp.RosBridgeClient.Protocols
             OnClosed?.Invoke(null, EventArgs.Empty);
         }
 
+        // Modificato per gestione errori.
         private async Task StartListen()
         {
             byte[] buffer = new byte[ReceiveChunkSize];
@@ -139,13 +152,20 @@ namespace RosSharp.RosBridgeClient.Protocols
                 WebSocketReceiveResult result;
                 do
                 {
-                    result = await clientWebSocket.ReceiveAsync(new ArraySegment<byte>(buffer), cancellationToken);
+                    try
+                    {
+                        result = await clientWebSocket.ReceiveAsync(new ArraySegment<byte>(buffer), cancellationToken);
 
-                    if (result.MessageType == WebSocketMessageType.Close)
+                        if (result.MessageType == WebSocketMessageType.Close)
+                            return;
+
+                        memoryStream.Write(buffer, 0, result.Count);
+
+                    }
+                    catch
+                    {
                         return;
-
-                    memoryStream.Write(buffer, 0, result.Count);
-
+                    }
                 } while (!result.EndOfMessage);
 
                 OnReceive?.Invoke(this, new MessageEventArgs(memoryStream.ToArray()));
